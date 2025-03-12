@@ -1,5 +1,7 @@
 export enum Resource {
-  patient = 'settings',
-  Medecin = 'products',
+  CropRecommendation = 'crop-recommendation',
+  settings = 'settings',
+  products = 'products',
+  users = 'users',
   
 }

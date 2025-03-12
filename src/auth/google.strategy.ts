@@ -14,7 +14,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     });
   }
 
-  async validate(accessToken: string, refreshToken: string, profile: any) {
+  /*async validate(accessToken: string, refreshToken: string, profile: any) {
     console.log('Access Token:', accessToken);
     console.log('Refresh Token:', refreshToken);
     console.log('Google Profile:', profile); // This should show the full profile data from Google
@@ -25,5 +25,5 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
   
     const user = await this.authService.findOrCreateUser(profile);
     return user;
-  }
+  }*/
 }

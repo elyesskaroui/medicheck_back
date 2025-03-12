@@ -13,11 +13,20 @@ import { ScraperModule } from './entities_scarpe/scraper.module';
 import config from './config/config';
 import { GemModule } from './gem/gem.module';
 import { VideoDownloaderModule } from './video-downloader/video-downloader.module';
-
+import { AnalyzeModule } from './analyze/analyze.module';
+import { ChatModule } from './chat/chat.module';
+import { ServeStaticModule } from '@nestjs/serve-static';
+import { join } from 'path';
 @Module({
   imports: [
     ScraperModule,
     ConfigModule.forRoot({
+      isGlobal: true,
+      cache: true,
+      load: [config],
+    }),
+    ConfigModule.forRoot({
+      envFilePath: '.env', 
       isGlobal: true,
       cache: true,
       load: [config],
@@ -44,6 +53,14 @@ import { VideoDownloaderModule } from './video-downloader/video-downloader.modul
     OrderModule,
     GemModule,
     VideoDownloaderModule,
+    ServeStaticModule.forRoot({
+      rootPath: join(__dirname, '..', 'uploads'), // Serve static files from "uploads"
+      serveRoot: '/uploads', // URL path prefix
+    }),
+    AuthModule,
+    RolesModule,
+    AnalyzeModule,
+    ChatModule,
   ],
   controllers: [AppController],
   providers: [AppService],

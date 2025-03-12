@@ -3,13 +3,16 @@ import {
   HttpStatus,
   Injectable,
   InternalServerErrorException,
+
+
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { SignupDto } from './dtos/signup.dto';
 import { InjectModel } from '@nestjs/mongoose';
-import { User } from '../user/entities/user.schema';
-import mongoose, { Model, Types } from 'mongoose';
+import { User } from './schemas/user.schema';
+import mongoose, { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { LoginDto } from './dtos/login.dto';
 import { JwtService } from '@nestjs/jwt';
@@ -17,11 +20,19 @@ import { RefreshToken } from './schemas/refresh-token.schema';
 import { v4 as uuidv4 } from 'uuid';
 import { nanoid } from 'nanoid';
 import { ResetToken } from './schemas/reset-token.schema';
-import { MailService } from 'src/service/mail.service';
+import { MailService } from 'src/services/mail.service';
 import { RolesService } from 'src/roles/roles.service';
+import * as crypto from 'crypto';
+import { UpdateProfileDto } from './dtos/update-profil.dto';
+import * as admin from 'firebase-admin';
+import { ConfigService } from '@nestjs/config';
+import * as path from 'path';
+import * as fs from 'fs';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     @InjectModel(User.name) private UserModel: Model<User>,
     @InjectModel(RefreshToken.name)
@@ -31,193 +42,80 @@ export class AuthService {
     private jwtService: JwtService,
     private mailService: MailService,
     private rolesService: RolesService,
+    private configService: ConfigService,
   ) {}
 
-  async signup(signupData: SignupDto) {
-    const { email, password, name, prenom } = signupData;
-  
-    // Check if email is in use
+  async signup(signupData: SignupDto, profilePicturePath?: string) {
+    const { email, password, name } = signupData;
+
+    // Check if email is already in use
     const emailInUse = await this.UserModel.findOne({ email });
     if (emailInUse) {
       throw new BadRequestException('Email already in use');
     }
-  
-    // Hash password
+
+    // Ensure password is provided
+    if (!password) {
+      throw new BadRequestException('Password is required');
+    }
+    // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
-  
-    // Create user document and save in MongoDB
-    const createdUser = await this.UserModel.create({
-      
+    // Create user document with optional profile picture
+    const user = new this.UserModel({
       name,
       email,
       password: hashedPassword,
-      prenom,
+      profilePicture: profilePicturePath || null, // Use the provided path or set to null
     });
-  
-    // Return the response with statusCode and user information
+
+    await user.save();
+
     return {
-      statusCode: HttpStatus.OK,
-      data: createdUser,
+      message: 'User created successfully',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+      },
     };
   }
 
+  async getUserProfile(userId: string) {
+    const user = await this.UserModel.findById(userId).select('-password');
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return {
+      name: user.name,
+      email: user.email,
+      profilePictureUrl: user.profilePicture
+        ? `${process.env.API_URL}/${user.profilePicture}`
+        : null,
+    };
+  }
 
   async login(credentials: LoginDto) {
     const { email, password } = credentials;
-  
-    // Trouver l'utilisateur par email dans la base de données
+    //Find if user exists by email
     const user = await this.UserModel.findOne({ email });
     if (!user) {
-        throw new UnauthorizedException('Wrong credentials');
+      throw new UnauthorizedException('Wrong credentials');
     }
-  
-    // Comparer le mot de passe entré avec le mot de passe stocké dans la base de données
+
+    //Compare entered password with existing password
     const passwordMatch = await bcrypt.compare(password, user.password);
-    if (!passwordMatch) {
-        throw new UnauthorizedException('Wrong credentials');
-    }
-  
-    // Générer les tokens JWT
-    const tokens = await this.generateUserTokens(user._id);
-  
-    // Retourner la réponse avec le message de succès, le statusCode, et les tokens
-    return {
-      statusCode: HttpStatus.OK,
-      userId: user._id,
-      name: user.name,
-      ...tokens,
-    };
-  
-}
-
-
-  async changePassword(userId, oldPassword: string, newPassword: string) {
-    //Find the user
-    const user = await this.UserModel.findById(userId);
-    if (!user) {
-      throw new NotFoundException('User not found...');
-    }
-
-    //Compare the old password with the password in DB
-    const passwordMatch = await bcrypt.compare(oldPassword, user.password);
     if (!passwordMatch) {
       throw new UnauthorizedException('Wrong credentials');
     }
 
-    //Change user's password
-    const newHashedPassword = await bcrypt.hash(newPassword, 10);
-    user.password = newHashedPassword;
-    await user.save();
-  }
-  async updateProfile(
-    userId: string,
-    email: string,
-    name: string,
-  ) {
-    // Find the user by ID (use userId from the authentication token)
-    const user = await this.UserModel.findById(userId);
-  
-    if (!user) {
-      throw new BadRequestException('User not found');
-    }
-  
-    // Check if the new email is already in use by another user
-    if (email && email !== user.email) {
-      const emailExists = await this.UserModel.findOne({ email });
-      if (emailExists) {
-        throw new BadRequestException('Email is already in use');
-      }
-      user.email = email;
-    }
-  
-    // Update the name if provided
-    if (name) {
-      user.name = name;
-    }
-  
-    // Save the updated user details
-    await user.save();
-  
-    // Return the updated user object or success message
+    //Generate JWT tokens
+    const tokens = await this.generateUserTokens(user._id);
     return {
-      message: 'Profile updated successfully',
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-      },
+      ...tokens,
+      userId: user._id,
     };
   }
-  
-// Backend modifications
-async forgotPassword(email: string) {
-  // Check that user exists
-  const user = await this.UserModel.findOne({ email });
-  
-  if (user) {
-    // Generate OTP code (6 digits)
-    const otp = Math.floor(100000 + Math.random() * 900000);
-    const expiryDate = new Date();
-    expiryDate.setMinutes(expiryDate.getMinutes() + 10); // OTP valid for 10 minutes
-    
-    // Save OTP in database
-    await this.ResetTokenModel.create({
-      token: otp,
-      userId: user._id,
-      expiryDate,
-    });
-    
-    // Send OTP by email
-    await this.mailService.sendOtpEmail(email, otp);
-  }
-  
-  return { message: 'If this user exists, they will receive an OTP code' };
-}
-
-async verifyOTP(email: string, otp: string) {
-  const user = await this.UserModel.findOne({ email });
-  if (!user) {
-    throw new UnauthorizedException('Invalid email');
-  }
-
-  const otpRecord = await this.ResetTokenModel.findOne({
-    token: otp,
-    userId: user._id,
-    expiryDate: { $gte: new Date() },
-  });
-
-  if (!otpRecord) {
-    throw new UnauthorizedException('Invalid or expired OTP');
-  }
-
-  // Generate temporary token for password reset
-  const resetToken = nanoid(64);
-  await this.ResetTokenModel.findByIdAndUpdate(otpRecord._id, {
-    token: resetToken,
-    expiryDate: new Date(Date.now() + 3600000), // 1 hour
-  });
-
-  return { resetToken };
-}
-
-async resetPassword(newPassword: string, resetToken: string) {
-  const tokenRecord = await this.ResetTokenModel.findOneAndDelete({
-    token: resetToken,
-    expiryDate: { $gte: new Date() },
-  });
-
-  if (!tokenRecord) {
-    throw new UnauthorizedException('Invalid or expired reset token');
-  }
-
-  const hashedPassword = await bcrypt.hash(newPassword, 10);
-  await this.UserModel.findByIdAndUpdate(tokenRecord.userId, {
-    password: hashedPassword,
-  });
-
-  return { message: 'Password successfully reset' };
-}
-
   async refreshTokens(refreshToken: string) {
     const token = await this.RefreshTokenModel.findOne({
       token: refreshToken,
@@ -255,6 +153,99 @@ async resetPassword(newPassword: string, resetToken: string) {
     );
   }
 
+  async changePassword(userId, oldPassword: string, newPassword: string) {
+    //Find the user
+    const user = await this.UserModel.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found...');
+    }
+
+    //Compare the old password with the password in DB
+    const passwordMatch = await bcrypt.compare(oldPassword, user.password);
+    if (!passwordMatch) {
+      throw new UnauthorizedException('Wrong credentials');
+    }
+
+    //Change user's password
+    const newHashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = newHashedPassword;
+    await user.save();
+  }
+
+  async forgotPassword(email: string) {
+    // Vérifier si l'utilisateur existe
+    const user = await this.UserModel.findOne({ email });
+
+    if (user) {
+      // Si l'utilisateur existe, générer un mot de passe temporaire
+      const newPassword = this.generateRandomPassword(12);
+      user.password = await bcrypt.hash(newPassword, 12);
+      await user.save();
+
+      // Envoyer le nouveau mot de passe par email
+      await this.mailService.sendPasswordResetEmail(email, newPassword);
+    }
+
+    return {
+      message:
+        'Si cet utilisateur existe, il recevra un nouvel email avec son mot de passe.',
+    };
+  }
+
+  private generateRandomPassword(length = 12): string {
+    const charset =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()';
+    let password = '';
+    const randomBytes = crypto.randomBytes(length);
+
+    for (let i = 0; i < length; i++) {
+      password += charset[randomBytes[i] % charset.length];
+    }
+
+    // Limiter la longueur du mot de passe généré
+    return password.slice(0, length);
+  }
+
+  async resetPassword(resetToken: string) {
+    this.logger.debug('Reset password function called');
+
+    try {
+      const token = await this.ResetTokenModel.findOneAndDelete({
+        token: resetToken,
+        expiryDate: { $gte: new Date() },
+      });
+
+      if (!token) {
+        this.logger.warn(`Invalid or expired reset token: ${resetToken}`);
+        throw new UnauthorizedException('Invalid or expired reset link');
+      }
+
+      const user = await this.UserModel.findById(token.userId);
+      if (!user) {
+        this.logger.error(`User not found for token: ${resetToken}`);
+        throw new InternalServerErrorException('User not found');
+      }
+
+      const newPassword = this.generateRandomPassword(12);
+      this.logger.debug(`Generated new password for user: ${user.email}`);
+
+      user.password = await bcrypt.hash(newPassword, 12);
+      await user.save();
+      this.logger.debug(`New password saved for user: ${user.email}`);
+
+      await this.mailService.sendPasswordResetEmail(user.email, newPassword);
+      this.logger.debug(`Password reset email sent to: ${user.email}`);
+
+      return { message: 'A new password has been sent to your email address.' };
+    } catch (error) {
+      this.logger.error(
+        `Error in resetPassword: ${error.message}`,
+        error.stack,
+      );
+      throw error;
+    }
+  }
+
   async getUserPermissions(userId: string) {
     const user = await this.UserModel.findById(userId);
 
@@ -263,75 +254,116 @@ async resetPassword(newPassword: string, resetToken: string) {
     const role = await this.rolesService.getRoleById(user.roleId.toString());
     return role.permissions;
   }
-  async loginGoogle(credentials: LoginDto) {
 
-    const { email, password } = credentials;
 
-    // Find if user exists by email
-    const user = await this.UserModel.findOne({ email });
+  private getUploadPath(): string {
+    return path.join(process.cwd(), 'uploads');
+  }
+
+
+  async updateProfile(
+    userId: string,
+    updateProfileDto: UpdateProfileDto,
+    file?: Express.Multer.File,
+  ) {
+    const user = await this.UserModel.findById(userId);
     if (!user) {
-      throw new UnauthorizedException('Wrong credentials');
+      throw new NotFoundException('User not found');
     }
-
-    // Compare entered password with existing password
-    const passwordMatch = password == user.password;
-    if (!passwordMatch) {
-      throw new UnauthorizedException('Wrong credentials this erorr ids from our');
+  
+    if (updateProfileDto.name) {
+      user.name = updateProfileDto.name;
     }
-
-    // Generate JWT tokens
-    const tokens = await this.generateUserTokens(user._id);
-
-    // Return response with statusCode and user information
+  
+    if (updateProfileDto.oldPassword && updateProfileDto.newPassword) {
+      const isPasswordValid = await bcrypt.compare(
+        updateProfileDto.oldPassword,
+        user.password,
+      );
+      if (!isPasswordValid) {
+        throw new BadRequestException('Old password is incorrect');
+      }
+      user.password = await bcrypt.hash(updateProfileDto.newPassword, 10);
+    }
+  
+    if (file) {
+      try {
+        // Get the correct upload path using getUploadPath
+        const uploadPath = this.getUploadPath();
+  
+        // Delete the old profile picture if it exists
+        if (user.profilePicture) {
+          // Remove the 'uploads/' prefix from the stored path to avoid double 'uploads' in the path
+          const oldPicturePath = path.join(uploadPath, user.profilePicture.replace('uploads/', ''));
+          console.log('Attempting to delete old profile picture at:', oldPicturePath);
+  
+          if (fs.existsSync(oldPicturePath)) {
+            fs.unlinkSync(oldPicturePath); // Delete the old profile picture
+          } else {
+            console.log('Old profile picture not found, skipping deletion');
+          }
+        }
+  
+        // Save the new profile picture path
+        user.profilePicture = `uploads/${file.filename}`;
+      } catch (error) {
+        console.error('Error handling profile picture:', error);
+        throw new BadRequestException('Error processing profile picture');
+      }
+    }
+  
+    await user.save();
+  
     return {
-      statusCode: HttpStatus.OK,
-      userId: user._id,
-      //userName: user.name,
-      //userEmail: user.email,
-      //userPassword: user.password,
-
-      ...tokens,
+      message: 'Profile updated successfully',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+      },
     };
   }
-  async findUserById(userId: string) {
-    // Validate the ID format before querying the database
-    if (!Types.ObjectId.isValid(userId)) {
-      throw new NotFoundException('Invalid user ID format');
-    }
 
-    const user = await this.UserModel.findById(userId).exec();
 
-    if (!user) {
+  async googleLogin(idToken: string) {
+    try {
+      console.log('ID Token Received: ', idToken); // Add this line to log the token
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      const { email, name, picture } = decodedToken;
 
-      return user
+      let user = await this.UserModel.findOne({ email });
 
-    }
+      if (!user) {
+        user = new this.UserModel({
+          email,
+          name,
+          profilePicture: picture,
+          password: await bcrypt.hash(nanoid(), 10),
+        });
+        await user.save();
+      }
 
-    return user;
-  }
-  async findUserByEmail(email: string): Promise<User | null> {
-    return this.UserModel.findOne({ email }).exec();
-  }
-  async findOrCreateUser(profile: any) {
-    const email = profile.emails[0].value;
-    const name = profile.displayName;
-    const prenom = profile.displayName;
-    // Check if the user already exists
-    let user = await this.findUserByEmail(email);
-    if (!user) {
-      // If user doesn't exist, create a new one with a placeholder password
-      const newUser: SignupDto = {
-        email,
-        name,
-        prenom,
-        password: '', // Leave main password empty as it's handled by Google
+      const tokens = await this.generateUserTokens(user._id);
+
+      return {
+        ...tokens,
+        userId: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
       };
-      const signupResult = await this.signup(newUser);
-      user = signupResult.data; // Access the created user directly from the signup result
-
+    } catch (error) {
+      this.logger.error(`Google Login Error: ${error.message}`, error.stack);
+      if (error.code === 'auth/id-token-expired') {
+        throw new UnauthorizedException('Google token has expired');
+      } else if (error.code === 'auth/invalid-id-token') {
+        throw new UnauthorizedException('Invalid Google token');
+      } else {
+        throw new InternalServerErrorException(
+          `An error occurred during Google login: ${error.message}`,
+        );
+      }
     }
-
-    return user;
   }
-
 }

@@ -12,11 +12,14 @@ export class CreateRoleDto {
   @IsString()
   name: string;
 
-  /*@ValidateNested()
+  @ValidateNested()
   @Type(() => Permission)
-  permissions: Permission[];*/
+  permissions: Permission[];
 }
-
+export interface Permission {
+  actions: Action[];
+  resource: Resource;
+}
 export class Permission {
   @IsEnum(Resource)
   resource: Resource;
