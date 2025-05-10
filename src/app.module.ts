@@ -13,6 +13,7 @@ import { ScraperModule } from './entities_scarpe/scraper.module';
 import config from './config/config';
 import { GemModule } from './gem/gem.module';
 import { VideoDownloaderModule } from './video-downloader/video-downloader.module';
+import { SocialModule } from './Social/entities_social/social.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { VideoDownloaderModule } from './video-downloader/video-downloader.modul
     OrderModule,
     GemModule,
     VideoDownloaderModule,
+    SocialModule
   ],
   controllers: [AppController],
   providers: [AppService],
